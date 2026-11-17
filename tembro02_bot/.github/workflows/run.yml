@@ -1,0 +1,77 @@
+name: tempo-runner
+
+on:
+  workflow_dispatch: {}          # bấm chạy tay
+  schedule:
+    # Gõ cửa mỗi ~15 phút (lệch phút, tránh đúng mốc :00/:30 GitHub hay nghẽn) trong khung
+    # 00:00–15:30 UTC = 07:00–22:30 giờ VN. Bản thân engine.mjs mới là nơi quyết định có
+    # thực sự chạy hay không: mỗi ngày tự chọn 5-10 mốc giờ ngẫu nhiên (state/plan.json),
+    # cron gọi bao nhiêu lần cũng chỉ "bắn" đúng lúc chạm 1 mốc trong plan đó.
+    - cron: "8,23,38,53 0-15 * * *"
+
+# Không cho 2 lần chạy chồng nhau (tránh push state đè nhau)
+concurrency:
+  group: tempo-runner
+  cancel-in-progress: false
+
+permissions:
+  contents: write                # để commit state ngược về repo
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cài sqlite3 (BẮT BUỘC cho payment-channel của Tempo)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3
+
+      - name: Cài Tempo CLI
+        run: |
+          curl -fsSL https://tempo.xyz/install | bash
+          echo "$HOME/.tempo/bin" >> "$GITHUB_PATH"
+          # Hâm nóng để launcher tải sẵn extension tempo-request
+          "$HOME/.tempo/bin/tempo" request --help >/dev/null 2>&1 || true
+
+      - name: Khôi phục ví Tempo từ secret (nếu dùng credential login)
+        env:
+          TEMPO_WALLET_B64: ${{ secrets.TEMPO_WALLET_B64 }}
+        run: |
+          if [ -z "$TEMPO_WALLET_B64" ]; then
+            echo "Không có TEMPO_WALLET_B64 — dùng TEMPO_PRIVATE_KEY."
+            exit 0
+          fi
+          mkdir -p "$HOME/.tempo"
+          echo "$TEMPO_WALLET_B64" | base64 -d > /tmp/w.tar.gz
+          tar -xzf /tmp/w.tar.gz -C "$HOME/.tempo"
+          rm -f /tmp/w.tar.gz
+
+      - name: Chạy 1 lượt
+        env:
+          MODE: live
+          TEMPO_BIN: tempo request
+          BOT_NAME: ${{ vars.BOT_NAME || github.event.repository.name }}
+          # Chạy tay (Run workflow) thì bỏ qua khung giờ; cron vẫn theo 7–22h VN
+          FORCE_ACTIVE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+          DAILY_CAP: ${{ vars.DAILY_CAP || '0.16' }}
+          TEMPO_PRIVATE_KEY: ${{ secrets.TEMPO_PRIVATE_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: node engine.mjs
+
+      - name: Commit state ngược về repo
+        run: |
+          git config user.name  "tempo-runner-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state/
+          if git diff --cached --quiet; then
+            echo "Không có thay đổi state."
+          else
+            git commit -m "[skip ci] update state $(date -u +%FT%TZ)"
+            git pull --rebase --autostash || true
+            git push
+          fi
