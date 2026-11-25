@@ -1,4 +1,4 @@
-# HANDOFF: tempo_guide (repo KattyFury/tempo_agent_active)
+# HANDOFF: tempo_guide (repo KattyFury/tempo_guide)
 
 Current state, checked 2026-11-21.
 
